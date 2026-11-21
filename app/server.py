@@ -106,15 +106,36 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return json_resp(self, {'error': f'{type(e).__name__}: {e}'}, 500)
 
+    def _404(self):
+        self.send_response(404)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def _redirect(self, to):
+        self.send_response(302)
+        self.send_header('Location', to)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
     def serve_static(self, path):
         if path in ('/', ''):
             path = '/index.html'
-        fp = os.path.normpath(os.path.join(WEB_DIR, path.lstrip('/')))
-        if not fp.startswith(WEB_DIR) or not os.path.isfile(fp):
-            self.send_response(404)
-            self.send_header('Content-Length', '0')
-            self.end_headers()
-            return
+
+        # standalone/ 是纯前端版本，同样对外提供
+        if path in ('/standalone', '/standalone/'):
+            return self._redirect('/standalone/index.html')
+        if path.startswith('/standalone/'):
+            root = os.path.join(BASE, 'standalone')
+            fp = os.path.normpath(os.path.join(root, path[len('/standalone/'):]))
+            if not fp.startswith(root):
+                return self._404()
+        else:
+            fp = os.path.normpath(os.path.join(WEB_DIR, path.lstrip('/')))
+            if not fp.startswith(WEB_DIR):
+                return self._404()
+
+        if not os.path.isfile(fp):
+            return self._404()
         ext = os.path.splitext(fp)[1].lower()
         data = open(fp, 'rb').read()
         self.send_response(200)
