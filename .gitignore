@@ -5,6 +5,9 @@ data/booklab.db-shm
 data/uploads/*
 !data/uploads/.gitkeep
 data/server.log
+data/server.pid
+data/.port
+data/.ip
 data/*.txt
 
 # Python
