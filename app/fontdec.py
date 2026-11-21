@@ -38,8 +38,9 @@ CJK_FONTS = [
     '/usr/share/fonts/noto/NotoSerifCJK-Regular.ttc',
 ]
 
-RENDER_SIZE = 96
-GRID = 48
+RENDER_SIZE = 72
+# 32x32 已足够区分绝大多数汉字，内存占用是 48x48 的 44%
+GRID = 32
 UA = ('Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 '
       '(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
 
@@ -103,10 +104,23 @@ def _render_glyph(font_path, char, size=RENDER_SIZE):
     if len(ys) == 0:
         return None
     crop = arr[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    im = Image.fromarray(crop).resize((GRID, GRID), Image.BICUBIC)
-    a = np.array(im, dtype=np.float32) / 255.0
-    a = (a - a.mean()) / (a.std() + 1e-6)
-    return a
+
+    # 等比缩放后居中补边：直接拉成正方形会把「一」「二」这种
+    # 极扁的字形纵向拉伸到糊成一片，丢失笔画特征
+    h, w = crop.shape
+    scale = (GRID * 0.86) / max(h, w)
+    nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+    resized = np.array(Image.fromarray(crop).resize((nw, nh), Image.BICUBIC), dtype=np.float32)
+
+    canvas = np.zeros((GRID, GRID), dtype=np.float32)
+    top = (GRID - nh) // 2
+    left = (GRID - nw) // 2
+    canvas[top:top + nh, left:left + nw] = resized
+
+    raw = canvas / 255.0
+    ink = float((raw > 0.35).mean())
+    a = (raw - raw.mean()) / (raw.std() + 1e-6)
+    return a, ink
 
 
 def _to_ttf(font_path):
@@ -138,7 +152,8 @@ def render_font_glyphs(font_path):
             z = np.load(cache, allow_pickle=True)
             codes = list(z['codes'])
             mats = z['mats']
-            return {int(c): mats[i] for i, c in enumerate(codes)}
+            inks = z['inks'] if 'inks' in z else np.ones(len(codes), dtype=np.float32) * 0.2
+            return {int(c): mats[i] for i, c in enumerate(codes)}, codes, inks
         except Exception:
             pass
 
@@ -148,20 +163,22 @@ def render_font_glyphs(font_path):
         return {}
 
     ttf = _to_ttf(font_path)
-    codes, mats = [], []
+    codes, mats, inks = [], [], []
     for code in pua:
-        arr = _render_glyph(ttf, chr(code))
-        if arr is not None:
+        r = _render_glyph(ttf, chr(code))
+        if r is not None:
             codes.append(code)
-            mats.append(arr)
+            mats.append(r[0])
+            inks.append(r[1])
     if not codes:
         return {}
     mats = np.stack(mats)
     try:
-        np.savez_compressed(cache, codes=np.array(codes), mats=mats)
+        np.savez_compressed(cache, codes=np.array(codes), mats=mats,
+                            inks=np.array(inks, dtype=np.float32))
     except Exception:
         pass
-    return {int(c): mats[i] for i, c in enumerate(codes)}
+    return {int(c): mats[i] for i, c in enumerate(codes)}, codes, np.array(inks, dtype=np.float32)
 
 
 def build_candidate_pool(font_paths=None):
@@ -186,10 +203,9 @@ def build_candidate_pool(font_paths=None):
     for ch in COMMON_CHARS:
         best = None
         for fp in fonts:
-            arr = _render_glyph(fp, ch)
-            if arr is not None:
-                # 取第一个成功渲染的（Sans Regular 优先）
-                best = arr
+            r = _render_glyph(fp, ch)
+            if r is not None:
+                best = r[0]
                 break
         if best is not None:
             chars.append(ch)
@@ -204,64 +220,123 @@ def build_candidate_pool(font_paths=None):
 
 # ---------------------------------------------------------------- 解码
 
-_POOL_CACHE = {}
-
-
 def _pool_for_font(fp):
-    """按字体缓存候选模板库（每字 48x48 归一化灰度）。"""
-    if fp in _POOL_CACHE:
-        return _POOL_CACHE[fp]
+    """按字体从磁盘缓存加载候选模板库（不常驻内存）。
+
+    服务是长跑进程，如果把 60MB+ 的模板库缓存在全局字典里，
+    iSH 容器内存会逐渐吃紧并最终 MemoryError。
+    """
     key = hashlib.md5((fp + str(os.path.getsize(fp))).encode()).hexdigest()[:12]
-    cache = os.path.join(FONT_CACHE_DIR, f'pool_{key}.npz')
+    cache = os.path.join(FONT_CACHE_DIR, f'pool_{GRID}_{key}.npz')
     if os.path.exists(cache):
         try:
             z = np.load(cache, allow_pickle=True)
-            res = (list(z['chars']), z['mats'])
-            _POOL_CACHE[fp] = res
-            return res
+            return list(z['chars']), z['mats']
         except Exception:
             pass
     chars, mats = [], []
     for ch in COMMON_CHARS:
-        arr = _render_glyph(fp, ch)
-        if arr is not None:
+        r = _render_glyph(fp, ch)
+        if r is not None:
             chars.append(ch)
-            mats.append(arr)
+            mats.append(r[0])
     mats = np.stack(mats).astype(np.float32)
     try:
         np.savez_compressed(cache, chars=np.array(chars), mats=mats)
     except Exception:
         pass
-    _POOL_CACHE[fp] = (chars, mats)
     return chars, mats
 
 
-def build_mapping(font_path, fonts=None):
+def build_mapping(font_path, fonts=None, chunk=1024, min_sim=0.35):
     """PUA 码位 -> 真实汉字。
 
-    做法：把每个 PUA 字形和候选汉字逐个比对（归一化互相关），取最相似者。
-    单字体效果最稳：番茄的字形是直接把某个字体的字稍微扰动坐标得到的，
-    用同一族字体比对命中率最高。多字体投票反而会因为不同字体的笔形差异
-    引入误判（实测「门」会变成「冂」）。
+    两级精排，兼顾精度与内存：
+      1. 32x32 粗筛，每字取前 K 个候选
+      2. 对这 K 个候选放大回 48x48 精比，定最终结果
+
+    低置信度保护：最佳相似度低于 min_sim 的码位不猜，保持原样。
+    实测番茄字体里混有「空白/占位」字形（几乎全白），强行比对会被
+    硬凑成某个汉字，还不如留空。
+
+    内存控制：候选库按 chunk 分批参与矩阵乘，绝不一次性生成
+    (6763 x N) 的中间矩阵——iSH 容器里那样会直接 MemoryError。
     """
-    glyphs = render_font_glyphs(font_path)
-    if not glyphs:
+    res = render_font_glyphs(font_path)
+    if not res:
         return {}
+    glyphs, all_codes, all_inks = res
 
     fonts = [p for p in (fonts or CJK_FONTS) if os.path.exists(p)]
     if not fonts:
         raise RuntimeError('缺少中文字体，请执行：apk add font-noto-cjk')
 
-    codes = list(glyphs.keys())
-    gly = np.stack([glyphs[c] for c in codes]).astype(np.float32).reshape(len(codes), -1)
+    # 剔除空/占位字形：用渲染时记录的原始墨迹占比。
+    # 不能用归一化后的像素判断——「一」这种笔画极少的字会被误伤。
+    ink_map = {int(c): float(all_inks[i]) for i, c in enumerate(all_codes)}
+    usable = {}
+    for code, g in glyphs.items():
+        ink = ink_map.get(code, 0.2)
+        if 0.015 <= ink <= 0.62:
+            usable[code] = g
+    if not usable:
+        return {}
+
+    codes = list(usable.keys())
+    gly = np.stack([usable[c] for c in codes]).astype(np.float32).reshape(len(codes), -1)
     gly_n = gly / (np.linalg.norm(gly, axis=1, keepdims=True) + 1e-6)
+    n_g = len(codes)
 
     chars, mats = _pool_for_font(fonts[0])
-    cand = mats.reshape(len(chars), -1)
-    cand_n = cand / (np.linalg.norm(cand, axis=1, keepdims=True) + 1e-6)
+    K = 30
 
-    best = np.argmax(cand_n @ gly_n.T, axis=0)
-    return {codes[gi]: chars[int(best[gi])] for gi in range(len(codes))}
+    # --- 第一级：粗筛 ---
+    top_sim = np.full((K, n_g), -2.0, dtype=np.float32)
+    top_idx = np.zeros((K, n_g), dtype=np.int32)
+
+    for s in range(0, len(chars), chunk):
+        part = mats[s:s + chunk].reshape(-1, gly.shape[1]).astype(np.float32)
+        part_n = part / (np.linalg.norm(part, axis=1, keepdims=True) + 1e-6)
+        sims = part_n @ gly_n.T
+        merged_sim = np.vstack([top_sim, sims])
+        merged_idx = np.vstack([top_idx,
+                                np.arange(s, s + sims.shape[0])[:, None]
+                                .repeat(n_g, axis=1).astype(np.int32)])
+        order = np.argsort(-merged_sim, axis=0)[:K]
+        top_sim = np.take_along_axis(merged_sim, order, axis=0)
+        top_idx = np.take_along_axis(merged_idx, order, axis=0)
+        del part, part_n, sims, merged_sim, merged_idx, order
+
+    # --- 第二级：top-K 放大到 48x48 精排 ---
+    mapping = {}
+    for gi, code in enumerate(codes):
+        g32 = usable[code]
+        g_hi = np.array(Image.fromarray(
+            ((g32 - g32.min()) / (np.ptp(g32) + 1e-6) * 255).astype(np.uint8)
+        ).resize((48, 48), Image.BICUBIC), dtype=np.float32)
+        g_hi = (g_hi - g_hi.mean()) / (g_hi.std() + 1e-6)
+        g_norm = np.linalg.norm(g_hi)
+
+        best_s, best_i = -2.0, None
+        for cid in top_idx[:, gi]:
+            c32 = mats[int(cid)]
+            c_hi = np.array(Image.fromarray(
+                ((c32 - c32.min()) / (np.ptp(c32) + 1e-6) * 255).astype(np.uint8)
+            ).resize((48, 48), Image.BICUBIC), dtype=np.float32)
+            c_hi = (c_hi - c_hi.mean()) / (c_hi.std() + 1e-6)
+            s_val = float((c_hi * g_hi).sum() / (np.linalg.norm(c_hi) * g_norm + 1e-6))
+            if s_val > best_s:
+                best_s, best_i = s_val, int(cid)
+
+        # 极简字形（如「一」「二」「十」）墨迹少、归一化后噪声大，
+        # 相似度天然偏低，给它们放宽阈值，否则会被丢弃成空白
+        ink = ink_map.get(code, 0.2)
+        thresh = min_sim * 0.55 if ink < 0.09 else min_sim
+
+        if best_i is not None and best_s >= thresh:
+            mapping[code] = chars[best_i]
+
+    return mapping
 
 
 def decode_text(text, mapping):
@@ -289,6 +364,13 @@ CONFUSION_FIX = {
     '匀这': '与这', '匀其': '与其',
     '时寸会': '时才会', '寸能': '才能', '寸可': '才可',
     '一瞬寸': '一瞬才',
+    # 闪 <- 门（等比缩放后仍偶发）
+    '掌闪': '掌门', '山闪': '山门', '入闪': '入门', '宗闪': '宗门',
+    '闪口': '门口', '闪派': '门派', '闪外': '门外', '闪内': '门内',
+    '闪主': '门主', '一闪': '一门', '闪下': '门下', '大闪': '大门',
+    # 寅 <- 直
+    '笔寅': '笔直', '正寅': '正直', '寅接': '直接', '寅线': '直线',
+    '寅到': '直到', '一寅': '一直', '寅属': '直属',
 }
 
 

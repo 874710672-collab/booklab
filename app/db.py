@@ -57,6 +57,24 @@ CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT
 );
+
+-- 后台任务表。任务跑在独立子进程里，靠这张表回传进度与结果，
+-- 这样即使子进程内存爆掉，主服务也不受影响。
+CREATE TABLE IF NOT EXISTS jobs (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'running',  -- running/done/error
+    progress   REAL DEFAULT 0,
+    stage      TEXT DEFAULT '',
+    message    TEXT DEFAULT '',
+    error      TEXT DEFAULT '',
+    result     TEXT DEFAULT '',
+    book_id    INTEGER,
+    grabbed    INTEGER DEFAULT 0,
+    total      INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -226,6 +244,62 @@ def kv_get(k, default=None):
 def kv_set(k, v):
     with conn() as c:
         c.execute('INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)', (k, str(v)))
+
+
+# ---------------- jobs（独立进程任务） ----------------
+
+def job_create(job_id, kind):
+    t = now()
+    with conn() as c:
+        c.execute('INSERT OR REPLACE INTO jobs(id,kind,status,created_at,updated_at) '
+                  'VALUES(?,?,?,?,?)', (job_id, kind, 'running', t, t))
+    return job_id
+
+
+def job_update(job_id, **kw):
+    if not kw:
+        return
+    kw['updated_at'] = now()
+    cols = ','.join(f'{k}=?' for k in kw)
+    with conn() as c:
+        c.execute(f'UPDATE jobs SET {cols} WHERE id=?', (*kw.values(), job_id))
+
+
+def job_get(job_id):
+    with conn() as c:
+        r = c.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        # result 存的是 JSON 字符串，这里还原
+        if d.get('result'):
+            try:
+                d['result'] = json.loads(d['result'])
+            except Exception:
+                pass
+        return d
+
+
+def job_reap(stale_seconds=90):
+    """把长时间没有心跳的 running 任务标记为失败。
+
+    任务跑在子进程里，如果子进程被 OOM kill 或异常退出，
+    主服务无法感知，只能靠心跳时间判断。
+    """
+    cutoff = now() - stale_seconds
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE jobs SET status='error', error='任务进程已退出（可能内存不足），请重试', "
+            "updated_at=? WHERE status='running' AND updated_at < ?",
+            (now(), cutoff))
+        return cur.rowcount
+
+
+def job_cleanup(days=1):
+    """清理陈旧的已完成任务，避免表无限增长。"""
+    cutoff = now() - days * 86400
+    with conn() as c:
+        c.execute("DELETE FROM jobs WHERE updated_at < ? AND status != 'running'", (cutoff,))
 
 
 if __name__ == '__main__':

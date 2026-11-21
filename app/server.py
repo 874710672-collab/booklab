@@ -29,102 +29,45 @@ MIME = {
     '.ico': 'image/x-icon',
 }
 
-# ---------------- 后台任务：番茄采集 ----------------
-CATALOG_JOBS = {}
-_job_seq = [0]
+# ---------------- 后台任务（跑在独立子进程里） ----------------
+# 为什么用子进程：字体解码要加载几十 MB 的字形模板，iSH 容器内存紧张，
+# 一旦在主进程里 OOM，整个 APP 就打不开了。放子进程后，最坏情况只是
+# 该任务失败，主服务依然正常响应。
+
+import subprocess
+import uuid
+
+APP_DIR = os.path.join(BASE, 'app')
+
+
+def _spawn(kind, job_id, *args):
+    """拉起 worker 子进程。"""
+    cmd = [sys.executable, os.path.join(APP_DIR, 'worker.py'), kind, job_id, *map(str, args)]
+    logf = open(os.path.join(BASE, 'data', 'worker.log'), 'ab')
+    subprocess.Popen(cmd, stdout=logf, stderr=logf,
+                     cwd=BASE, start_new_session=True)
+    return job_id
+
+
+def _new_job(kind):
+    jid = f'{kind[:3]}{uuid.uuid4().hex[:10]}'
+    db.job_create(jid, kind)
+    return jid
 
 
 def _start_catalog_job(chapter_id):
-    _job_seq[0] += 1
-    tid = str(_job_seq[0])
-    job = {'id': tid, 'status': 'running', 'progress': 0,
-           'message': '准备中…', 'result': None, 'error': None}
-    CATALOG_JOBS[tid] = job
-
-    def worker():
-        try:
-            import fanqie as fq
-
-            def prog(p, m):
-                job['progress'] = round(p, 3)
-                job['message'] = m
-
-            cat = fq.walk_catalog(chapter_id, on_progress=prog)
-            job['result'] = cat
-            job['status'] = 'done'
-            job['progress'] = 1.0
-            job['message'] = f"完成：{len(cat['chapters'])} 章"
-        except Exception as e:
-            job['status'] = 'error'
-            job['error'] = f'{type(e).__name__}: {e}'[:300]
-
-    threading.Thread(target=worker, daemon=True).start()
-    return tid
+    jid = _new_job('catalog')
+    return _spawn('catalog', jid, chapter_id)
 
 
 def _start_fetch_job(chapter_id, max_chapters=30):
-    """用浏览器会话逐章抓取并解码，存入新书。
+    jid = _new_job('fanqie')
+    return _spawn('fanqie', jid, chapter_id, max_chapters)
 
-    番茄网页端每章只有约 200 字预览（服务端限制，与登录无关），
-    所以本功能主要把「能拿到的部分」做好：字体解码还原成可读文本。
-    """
-    _job_seq[0] += 1
-    tid = f'f{_job_seq[0]}'
-    job = {'id': tid, 'status': 'running', 'progress': 0, 'message': '准备中…',
-           'grabbed': 0, 'total': 0, 'book_id': None, 'error': None}
-    CATALOG_JOBS[tid] = job
 
-    def worker():
-        try:
-            import browser_fetch as bf
-
-            rows = []
-            cid = str(chapter_id)
-            name = author = ''
-            seen = set()
-            worker_tab = bf.open_worker_tab()
-            job['message'] = '已打开采集专用标签页'
-
-            # 若给的章节是全书最后一章（nextItemId 为空），先往回退到能前进的位置
-            first = bf.decode_chapter(bf.fetch_chapter(cid, tab_id=worker_tab))
-            if first.get('title') and not first.get('nextItemId') and first.get('preItemId'):
-                cid = first['preItemId']
-                job['message'] = '已定位起始章，准备向前抓取…'
-
-            for i in range(max_chapters):
-                if not cid or cid in seen:
-                    break
-                seen.add(cid)
-                d = bf.decode_chapter(bf.fetch_chapter(cid, tab_id=worker_tab))
-                if not d.get('title'):
-                    break
-                name = name or d.get('bookName', '')
-                author = author or d.get('author', '')
-                if d.get('text'):
-                    rows.append((d['title'], d['text']))
-                job['grabbed'] = len(rows)
-                job['total'] = d.get('serialCount', 0) or job['total']
-                job['progress'] = round(len(rows) / max(1, max_chapters), 3)
-                job['message'] = f"已抓 {len(rows)} 章：{d['title']}"
-                cid = d.get('nextItemId') or ''
-
-            if not rows:
-                job['status'] = 'error'
-                job['error'] = '未抓到任何章节内容'
-                return
-
-            bid = db.add_book(name or f'番茄_{chapter_id}', author, 'fanqie', str(chapter_id))
-            db.add_chapters(bid, rows)
-            job['book_id'] = bid
-            job['status'] = 'done'
-            job['progress'] = 1.0
-            job['message'] = f'完成：{len(rows)} 章已入库（每章为网页端预览片段）'
-        except Exception as e:
-            job['status'] = 'error'
-            job['error'] = f'{type(e).__name__}: {e}'[:300]
-
-    threading.Thread(target=worker, daemon=True).start()
-    return tid
+def _start_analyse_job(analysis_id):
+    jid = _new_job('analyse')
+    return _spawn('analyse', jid, analysis_id)
 
 
 def json_resp(handler, obj, status=200):
@@ -239,8 +182,9 @@ class Handler(BaseHTTPRequestHandler):
             return json_resp(self, {'ok': True, 'task': tid})
 
         if route == 'fanqie_task':
+            db.job_reap()
             tid = (qs.get('task', [''])[0] or '').strip()
-            job = CATALOG_JOBS.get(tid)
+            job = db.job_get(tid)
             if not job:
                 return json_resp(self, {'error': '任务不存在'}, 404)
             return json_resp(self, job)
@@ -286,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not a:
                     return json_resp(self, {'error': 'not found'}, 404)
                 db.update_analysis(aid, status='pending', message='已排入队列')
-                threading.Thread(target=engine.run_analysis, args=(aid,), daemon=True).start()
+                _start_analyse_job(aid)
                 return json_resp(self, {'ok': True, 'id': aid})
 
             return json_resp(self, {'error': 'unknown route'}, 404)
@@ -342,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
             return json_resp(self, {'ok': True, 'id': running[0]['id'], 'existing': True})
         aid = db.create_analysis(bid, model=engine.MODEL)
         db.update_analysis(aid, status='pending', message='已排入队列')
-        threading.Thread(target=engine.run_analysis, args=(aid,), daemon=True).start()
+        _start_analyse_job(aid)
         return json_resp(self, {'ok': True, 'id': aid})
 
 
