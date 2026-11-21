@@ -2,7 +2,8 @@
 data/booklab.db
 data/booklab.db-wal
 data/booklab.db-shm
-data/uploads/
+data/uploads/*
+!data/uploads/.gitkeep
 data/server.log
 data/*.txt
 
