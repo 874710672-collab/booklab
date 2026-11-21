@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0c0d10">
+<title>书析 · 拆书</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+  <!-- 侧栏 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17.5a2.5 2.5 0 0 1-2.5 2.5H6.5A2.5 2.5 0 0 1 4 19.5v-15Z" stroke="currentColor" stroke-width="1.6"/><path d="M8 7h8M8 11h8M8 15h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </div>
+      <div>
+        <h1>书析</h1>
+        <p>网文拆书工作台</p>
+      </div>
+    </div>
+
+    <button class="btn primary wide" id="btnImport">
+      <svg viewBox="0 0 24 24" fill="none" width="18" height="18"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 20h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      导入书稿
+    </button>
+
+    <div class="sec-title">书架</div>
+    <div class="booklist" id="bookList">
+      <div class="empty-hint">还没有书</div>
+    </div>
+
+    <div class="sidebar-foot">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">就绪</span>
+    </div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main" id="main">
+    <div class="placeholder" id="placeholder">
+      <div class="ph-icon">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 19.5V6a2 2 0 0 1 2-2h13v16H6a2 2 0 0 1-2-2v.5Z" stroke="currentColor" stroke-width="1.3"/><path d="M9 8h7M9 12h7M9 16h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </div>
+      <h2>开始拆解一本小说</h2>
+      <p>导入 txt / epub，或直接粘贴正文。系统会先把全书划分为故事单元，再逐个单元做深度拆解。</p>
+      <button class="btn primary" id="btnImport2">导入书稿</button>
+    </div>
+
+    <!-- 书籍详情 -->
+    <section class="bookview" id="bookView" hidden>
+      <header class="bookhead">
+        <div>
+          <h2 id="bkTitle">书名</h2>
+          <div class="meta" id="bkMeta"></div>
+        </div>
+        <div class="head-actions">
+          <button class="btn primary" id="btnAnalyse">开始拆书</button>
+          <button class="btn ghost" id="btnEstimate">预估成本</button>
+          <button class="btn danger-ghost" id="btnDeleteBook">删除</button>
+        </div>
+      </header>
+      <div id="analyseStatus"></div>
+      <div class="tabs" id="bookTabs">
+        <button class="tab active" data-tab="units">拆解结果</button>
+        <button class="tab" data-tab="chapters">章节目录</button>
+        <button class="tab" data-tab="raw">原文</button>
+      </div>
+      <div class="tabpane" id="paneUnits"></div>
+      <div class="tabpane" id="paneChapters" hidden></div>
+      <div class="tabpane" id="paneRaw" hidden></div>
+    </section>
+  </main>
+</div>
+
+<!-- 导入弹窗 -->
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h3>导入书稿</h3>
+      <button class="x" id="btnCloseModal">✕</button>
+    </div>
+    <div class="tabs small">
+      <button class="tab active" data-itab="file">文件</button>
+      <button class="tab" data-itab="paste">粘贴文本</button>
+      <button class="tab" data-itab="fanqie">番茄</button>
+    </div>
+
+    <div class="ipane" id="ipaneFile">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept=".txt,.epub,.md" hidden>
+        <svg viewBox="0 0 24 24" fill="none" width="34" height="34"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 20h16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="dz-title">点击选择文件</div>
+        <div class="dz-sub">支持 .txt / .epub，自动识别章节</div>
+      </label>
+    </div>
+
+    <div class="ipane" id="ipanePaste" hidden>
+      <input class="input" id="pasteTitle" placeholder="书名（可选）">
+      <textarea class="input area" id="pasteText" placeholder="把小说正文粘贴到这里，会自动按「第X章」切分…"></textarea>
+    </div>
+
+    <div class="ipane" id="ipaneFanqie" hidden>
+      <div class="fq-note">
+        <b>如何拿到章节 ID</b>
+        在 Safari 打开番茄任意一章，地址栏形如<br>
+        <code>fanqienovel.com/reader/<em>7678773871318680088</em></code><br>
+        末尾那串数字就是。
+      </div>
+      <input class="input" id="fqChapter" placeholder="章节 ID（一串数字）" inputmode="numeric">
+      <div class="fq-row">
+        <label class="fq-label">抓取章数</label>
+        <input class="input fq-num" id="fqMax" type="number" value="10" min="1" max="200">
+      </div>
+      <div class="fq-warn">
+        ⚠️ 番茄网页端每章只下发约 200 字预览（服务端限制，登录也无法解除），
+        本功能会把片段里的乱码还原成可读文字。完整正文仅在番茄 App 内提供。
+      </div>
+      <div class="fq-progress" id="fqProgress" hidden>
+        <div class="progress"><i id="fqBar"></i></div>
+        <div class="hint" id="fqMsg"></div>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <div class="hint" id="importHint"></div>
+      <button class="btn primary" id="btnDoImport">导入</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
