@@ -60,6 +60,8 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 .empty-hint{font-size:13px;color:var(--text3);padding:18px 12px;text-align:center}
 .sidebar-foot{display:flex;align-items:center;gap:7px;padding:11px 8px 2px;
   border-top:1px solid var(--line2);font-size:11.5px;color:var(--text3)}
+.ver{margin-left:auto;font-size:10.5px;color:var(--text3);opacity:.65;
+  font-variant-numeric:tabular-nums;letter-spacing:.3px}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:0 0 6px}
 .dot.busy{background:var(--yellow);animation:pulse 1.4s infinite}
 .dot.err{background:var(--red)}
@@ -239,6 +241,7 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
     <div class="sidebar-foot">
       <span class="dot" id="statusDot"></span>
       <span id="statusText">就绪</span>
+      <span class="ver" id="verLabel">v—</span>
     </div>
   </aside>
 
@@ -287,12 +290,12 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
     </div>
 
     <div class="ipane" id="ipaneFile">
-      <label class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept=".txt,.epub,.md" hidden>
+      <div class="dropzone" id="dropzone" role="button" tabindex="0">
         <div class="dz-icon">＋</div>
         <div class="dz-title">点击选择文件</div>
         <div class="dz-sub">支持 .txt / .epub，自动识别章节</div>
-      </label>
+      </div>
+      <input type="file" id="fileInput" accept=".txt,.epub,.md" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
     </div>
 
     <div class="ipane" id="ipanePaste" hidden>
@@ -327,6 +330,6 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=130"></script>
 </body>
 </html>

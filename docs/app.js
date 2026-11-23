@@ -927,7 +927,16 @@ function switchTab(name) {
 }
 
 /* ============ 初始化 ============ */
+/* 版本号：每次改动递增，用于确认线上是否为最新版 */
+const APP_VERSION = '1.3.0';
+const APP_BUILD = '2026-11-23';
+
 async function init() {
+  // 显示版本号
+  const vl = $('#verLabel');
+  if (vl) vl.textContent = `v${APP_VERSION}`;
+  document.title = `书析 · 拆书 v${APP_VERSION}`;
+
   $('#btnImport').onclick = () => openModal();
   $('#btnImport2').onclick = () => openModal();
   $('#btnCloseModal').onclick = closeModal;
@@ -949,7 +958,17 @@ async function init() {
 
   // 文件选择
   const fi = $('#fileInput'), dz = $('#dropzone');
-  dz.onclick = (e) => { e.preventDefault(); fi.click(); };
+  // 不要在 label 上 preventDefault，也不要同时让 label 和 JS 各触发一次，
+  // 否则 iOS 上会出现「点一下只高亮、选择器不弹」。
+  dz.addEventListener('click', (e) => {
+    e.stopPropagation();
+    try { fi.click(); } catch (err) {
+      $('#importHint').textContent = '无法打开文件选择器：' + (err.message || err);
+    }
+  });
+  dz.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fi.click(); }
+  });
 
   const pick = (f) => {
     state.pendingFile = f;
