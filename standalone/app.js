@@ -800,12 +800,15 @@ function openModal(tabName) {
   $('#modalMask').hidden = false;
   $('#importHint').textContent = '';
   state.pendingFile = null;
+  const fi = $('#fileInput');
+  if (fi) fi.value = '';
   $('.dz-title').textContent = '点击选择文件';
   $('.dz-sub').textContent = '支持 .txt / .epub，自动识别章节';
-  if (tabName) {
-    const btn = $$('.modal .tab').find(t => t.dataset.itab === tabName);
-    if (btn) btn.click();
-  }
+
+  // 未配置 Key 时默认停在设置页，其余情况一律回到「文件」
+  const target = tabName || (state.cfg.apiKey ? 'file' : 'settings');
+  const btn = $$('.modal .tab').find(t => t.dataset.itab === target);
+  if (btn) btn.click();
 }
 
 function closeModal() { $('#modalMask').hidden = true; }
@@ -824,13 +827,23 @@ async function doImport() {
 
   const btn = $('#btnDoImport');
 
+  // 兜底：如果当前显示的既不是文件也不是粘贴面板，强制回到文件面板
+  const fileVisible = !$('#ipaneFile').hidden;
+  const pasteVisible = !$('#ipanePaste').hidden;
+  if (!fileVisible && !pasteVisible) {
+    const t = $$('.modal .tab').find(x => x.dataset.itab === 'file');
+    if (t) t.click();
+    $('#importHint').textContent = '已切到「文件」，请选择要导入的书';
+    return;
+  }
+
   // 前置校验：失败时不要锁住按钮，否则会永久变灰
-  if (!$('#ipaneFile').hidden && !state.pendingFile) {
+  if (fileVisible && !state.pendingFile) {
     $('#importHint').textContent = '请先点击上方虚线框选择文件';
     toast('请先选择文件', true);
     return;
   }
-  if (!$('#ipanePaste').hidden && !$('#pasteText').value.trim()) {
+  if (pasteVisible && !$('#pasteText').value.trim()) {
     $('#importHint').textContent = '粘贴框是空的';
     toast('内容为空', true);
     return;
@@ -842,8 +855,9 @@ async function doImport() {
   try {
     let title, author = '', chapters, source;
 
-    if (!$('#ipaneFile').hidden) {
+    if (fileVisible) {
       const f = state.pendingFile;
+      if (!f) throw new Error('文件已丢失，请重新选择');
       if (/\.epub$/i.test(f.name)) {
         $('#importHint').textContent = '正在解析 epub…';
         const r = await readEpubFile(f);
