@@ -823,6 +823,19 @@ async function doImport() {
   }
 
   const btn = $('#btnDoImport');
+
+  // 前置校验：失败时不要锁住按钮，否则会永久变灰
+  if (!$('#ipaneFile').hidden && !state.pendingFile) {
+    $('#importHint').textContent = '请先点击上方虚线框选择文件';
+    toast('请先选择文件', true);
+    return;
+  }
+  if (!$('#ipanePaste').hidden && !$('#pasteText').value.trim()) {
+    $('#importHint').textContent = '粘贴框是空的';
+    toast('内容为空', true);
+    return;
+  }
+
   btn.disabled = true;
   $('#importHint').textContent = '正在解析…';
 
@@ -830,9 +843,9 @@ async function doImport() {
     let title, author = '', chapters, source;
 
     if (!$('#ipaneFile').hidden) {
-      if (!state.pendingFile) { toast('请先选择文件', true); return; }
       const f = state.pendingFile;
       if (/\.epub$/i.test(f.name)) {
+        $('#importHint').textContent = '正在解析 epub…';
         const r = await readEpubFile(f);
         title = r.title; author = r.author; chapters = r.chapters;
       } else {
@@ -843,7 +856,6 @@ async function doImport() {
       source = 'file';
     } else {
       const text = $('#pasteText').value;
-      if (!text.trim()) { toast('内容为空', true); return; }
       title = $('#pasteTitle').value.trim() || '粘贴文本';
       chapters = splitChapters(text);
       source = 'paste';
@@ -862,6 +874,13 @@ async function doImport() {
     toast(`已导入《${title}》，${chapters.length} 章`);
     $('#pasteText').value = '';
     $('#pasteTitle').value = '';
+    // 清空已选文件，避免下次导入带上一本书
+    state.pendingFile = null;
+    const fi = $('#fileInput');
+    if (fi) fi.value = '';
+    $('#importHint').textContent = '';
+    $('.dz-title').textContent = '点击选择文件';
+    $('.dz-sub').textContent = '支持 .txt / .epub，自动识别章节';
     await loadBooks(bookId);
   } catch (e) {
     $('#importHint').textContent = '导入失败：' + (e.message || e);
@@ -916,13 +935,35 @@ async function init() {
 
   // 文件选择
   const fi = $('#fileInput'), dz = $('#dropzone');
-  dz.onclick = () => fi.click();
+  dz.onclick = (e) => { e.preventDefault(); fi.click(); };
+
   const pick = (f) => {
     state.pendingFile = f;
     $('.dz-title', dz).textContent = f.name;
     $('.dz-sub', dz).textContent = (f.size / 1024).toFixed(0) + ' KB';
+    $('#importHint').textContent = '已选择：' + f.name + '，点「导入」开始';
   };
-  fi.onchange = () => { if (fi.files[0]) pick(fi.files[0]); };
+
+  // iOS Safari 对隐藏的 input 有时不触发 change，
+  // 这里同时监听 change 和 input，并做一次去重
+  let lastPicked = '';
+  const onChange = () => {
+    const f = fi.files && fi.files[0];
+    if (!f) {
+      // 有些机型选完文件后 files 会被后续渲染清空，给出提示而不是静默
+      if (!state.pendingFile) {
+        $('#importHint').textContent = '没有读到文件，请重新选择';
+      }
+      return;
+    }
+    const sig = f.name + ':' + f.size + ':' + f.lastModified;
+    if (sig === lastPicked) return;
+    lastPicked = sig;
+    pick(f);
+  };
+  fi.addEventListener('change', onChange);
+  fi.addEventListener('input', onChange);
+
   dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('drag'); };
   dz.ondragleave = () => dz.classList.remove('drag');
   dz.ondrop = (e) => {
