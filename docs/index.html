@@ -125,6 +125,60 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 .uc-body{display:none;padding:18px 20px 20px 57px;border-top:1px solid var(--line2)}
 .unit-card.open .uc-body{display:block}
 
+/* ============ 人物关系图 ============ */
+.rel-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin-bottom:14px;padding:12px 14px;background:var(--bg2);
+  border:1px solid var(--line);border-radius:var(--r)}
+.rel-select{background:var(--bg3);border:1px solid var(--line);color:var(--text);
+  border-radius:9px;padding:8px 12px;font-family:inherit;font-size:13.5px;
+  outline:none;cursor:pointer;min-width:180px}
+.rel-select:focus{border-color:var(--accent)}
+.rel-hint{font-size:12px;color:var(--text3);margin-left:auto}
+.rel-hint b{color:var(--text2);font-weight:600}
+
+.rel-stage{position:relative;background:var(--bg2);border:1px solid var(--line);
+  border-radius:var(--r);overflow:hidden}
+.rel-svg{display:block;width:100%;height:auto;touch-action:none;
+  -webkit-user-select:none;user-select:none}
+
+.rel-edge{stroke:#39405080;stroke-width:1.6;fill:none}
+.rel-edge.strong{stroke:rgba(232,115,74,.55);stroke-width:2.4}
+.rel-edge-label{font-size:10.5px;fill:#8a90a0;text-anchor:middle;
+  paint-order:stroke;stroke:#121419;stroke-width:3px;stroke-linejoin:round}
+
+.rel-node{cursor:pointer}
+.rel-node circle{stroke:#121419;stroke-width:2}
+.rel-node text{font-size:11.5px;fill:#e8eaf0;text-anchor:middle;
+  paint-order:stroke;stroke:#121419;stroke-width:3.5px;
+  stroke-linejoin:round;pointer-events:none;font-weight:500}
+.rel-node .ring{stroke:var(--accent);stroke-width:2;fill:none;opacity:0;
+  transition:opacity .15s}
+.rel-node:hover .ring,.rel-node.sel .ring{opacity:1}
+.rel-node.dim{opacity:.22}
+
+.rel-legend{display:flex;gap:16px;flex-wrap:wrap;padding:10px 14px;
+  border-top:1px solid var(--line2);font-size:11.5px;color:var(--text3)}
+.rel-legend span{display:inline-flex;align-items:center;gap:6px}
+.rel-legend i{width:9px;height:9px;border-radius:50%;display:inline-block}
+
+.rel-detail{margin-top:14px;padding:16px 18px;background:var(--bg2);
+  border:1px solid var(--line);border-radius:var(--r)}
+.rel-detail h3{margin:0 0 10px;font-size:15.5px;color:var(--accent2);font-weight:620}
+.rel-detail .kv{font-size:13px;color:var(--text2);margin-bottom:7px;line-height:1.75}
+.rel-detail .kv b{color:var(--text3);font-weight:500;margin-right:6px}
+.rel-detail .rel-list{list-style:none;padding:0;margin:10px 0 0}
+.rel-detail .rel-list li{font-size:12.5px;color:var(--text2);padding:7px 0;
+  border-top:1px solid var(--line2);line-height:1.7}
+.rel-detail .rel-list li:first-child{border-top:none}
+
+.rel-empty{text-align:center;padding:56px 24px;color:var(--text3);font-size:13.5px}
+.rel-empty b{display:block;color:var(--text2);font-size:14.5px;margin-bottom:8px}
+
+@media(max-width:700px){
+  .rel-hint{margin-left:0;width:100%}
+  .rel-select{width:100%}
+}
+
 /* markdown */
 .md{font-size:14px;line-height:1.82;color:#ccd1dd}
 .md h2{font-size:15.5px;color:var(--accent2);font-weight:620;margin:22px 0 9px;
@@ -267,10 +321,12 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
       <div id="analyseStatus"></div>
       <div class="tabs" id="bookTabs">
         <button class="tab active" data-tab="units">拆解结果</button>
+        <button class="tab" data-tab="relations">人物关系图</button>
         <button class="tab" data-tab="chapters">章节目录</button>
         <button class="tab" data-tab="raw">原文</button>
       </div>
       <div class="tabpane" id="paneUnits"></div>
+      <div class="tabpane" id="paneRelations" hidden></div>
       <div class="tabpane" id="paneChapters" hidden></div>
       <div class="tabpane" id="paneRaw" hidden></div>
     </section>
@@ -330,6 +386,6 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="app.js?v=130"></script>
+<script src="app.js?v=140"></script>
 </body>
 </html>

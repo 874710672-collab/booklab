@@ -916,19 +916,366 @@ async function deleteBook() {
   toast('已删除');
 }
 
+
+/* ============ 人物关系图 ============ */
+/*
+ * 数据来源：已有的拆书结果（每个单元的 detail markdown）。
+ * 解析其中的「登场角色」和「人物关系」两节，抽成节点与边。
+ * 不额外调用 LLM，省钱且不会引入新的不一致。
+ */
+
+const REL_PALETTE = [
+  '#e8734a', '#4ec9a0', '#5b9bd5', '#b07cd8',
+  '#e0b04a', '#e05c7a', '#56b8c4', '#8fa564',
+];
+
+/* ---- 从 markdown 里抽取角色与关系 ---- */
+
+function splitSections(md) {
+  // 按 ## 标题切片
+  const secs = [];
+  let cur = null;
+  for (const line of md.split('\n')) {
+    const m = line.match(/^#{2,3}\s+(.+?)\s*$/);
+    if (m) {
+      if (cur) secs.push(cur);
+      cur = { title: m[1], body: [] };
+    } else if (cur) {
+      cur.body.push(line);
+    }
+  }
+  if (cur) secs.push(cur);
+  return secs;
+}
+
+function parseCharacters(md) {
+  const sec = splitSections(md).find(s => /登场角色|角色/.test(s.title));
+  if (!sec) return [];
+
+  const chars = [];
+  let cur = null;
+
+  for (const raw of sec.body) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    // 角色行：- **名字**（身份/阵营）  或  - **名字**
+    const head = line.match(/^[-*+]\s*\*\*(.+?)\*\*\s*[（(]?\s*([^）)]*)[）)]?\s*$/);
+    if (head) {
+      const name = head[1].trim().replace(/[：:].*$/, '');
+      if (!name || name.length > 12) continue;
+      cur = { name, role: (head[2] || '').trim(), info: '', camp: '', action: '', effect: '' };
+      chars.push(cur);
+      continue;
+    }
+
+    if (!cur) continue;
+
+    // 子项：  - 个人信息背景：xxx
+    const kv = line.match(/^[-*+]\s*(?:>\s*)?\*{0,2}([^：:]{2,12})[：:]\s*(.*)$/);
+    if (kv) {
+      const k = kv[1].replace(/\*/g, '').trim();
+      const v = kv[2].trim();
+      if (/背景|信息|出身|年龄/.test(k)) cur.info = v;
+      else if (/阵营|势力|所属/.test(k)) cur.camp = v;
+      else if (/扮演|角色/.test(k)) cur.action = v;
+      else if (/作用/.test(k)) cur.effect = v;
+      else if (!cur.info) cur.info = v;
+      continue;
+    }
+
+    // 续行
+    const t = line.replace(/^[-*+]\s*/, '').replace(/\*\*/g, '').trim();
+    if (t && !cur.info) cur.info = t;
+  }
+
+  return chars.filter(c => c.name);
+}
+
+function parseRelations(md, knownNames) {
+  const sec = splitSections(md).find(s => /人物关系|关系/.test(s.title));
+  if (!sec) return [];
+
+  const rels = [];
+  const push = (a, b, desc) => {
+    a = a.trim(); b = b.trim();
+    if (!a || !b || a === b) return;
+    // 只保留已知角色之间的边，避免噪声
+    if (knownNames.length && (!knownNames.includes(a) || !knownNames.includes(b))) return;
+    rels.push({ a, b, desc: (desc || '').trim() });
+  };
+
+  for (const raw of sec.body) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    // A → B：关系  /  A -> B: 关系
+    let m = line.match(/^[-*+\d.)、\s]*\*{0,2}([^→\->：:\n]{1,12})\*{0,2}\s*(?:→|->|—>|=>)\s*\*{0,2}([^：:\n]{1,12})\*{0,2}\s*[：:]\s*(.*)$/);
+    if (m) { push(m[1], m[2], m[3]); continue; }
+
+    // A 与 B 是/为 xxx
+    m = line.match(/^[-*+\d.)、\s]*([^\s，,、：:]{1,10})\s*(?:与|和|跟)\s*([^\s，,、：:]{1,10})\s*[：:是]\s*(.*)$/);
+    if (m) { push(m[1], m[2], m[3]); continue; }
+
+    // A：xxx（单边描述，尝试从中找出另一个角色名）
+    m = line.match(/^[-*+\d.)、\s]*\*{0,2}([^\s，,、：:]{1,10})\*{0,2}\s*[：:]\s*(.*)$/);
+    if (m) {
+      const a = m[1], desc = m[2];
+      const other = knownNames.find(n => n !== a && desc.includes(n));
+      if (other) push(a, other, desc);
+    }
+  }
+  return rels;
+}
+
+/* ---- 力导向布局（简易实现） ---- */
+
+function layoutGraph(nodes, edges, width, height) {
+  const cx = width / 2, cy = height / 2;
+  const n = nodes.length;
+  if (!n) return nodes;
+
+  // 初始：环形分布，避免全部重叠
+  nodes.forEach((nd, i) => {
+    const ang = (i / n) * Math.PI * 2;
+    const rad = Math.min(width, height) * 0.30;
+    nd.x = cx + Math.cos(ang) * rad;
+    nd.y = cy + Math.sin(ang) * rad;
+    nd.vx = 0; nd.vy = 0;
+  });
+
+  const byName = {};
+  nodes.forEach(nd => byName[nd.name] = nd);
+
+  // 理想边长按画布尺寸和节点数估算，给足空间避免挤成一团
+  const k = Math.sqrt((width * height) / Math.max(1, n)) * 1.05;
+  const iterations = 420;
+
+  for (let it = 0; it < iterations; it++) {
+    const t = 1 - it / iterations;   // 温度，逐渐冷却
+
+    // 斥力（所有节点两两）
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = nodes[i], b = nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) { dx = (Math.random() - 0.5) * 2; dy = (Math.random() - 0.5) * 2; d2 = 4; }
+        const d = Math.sqrt(d2);
+        const f = (k * k) / d;
+        const ux = dx / d, uy = dy / d;
+        a.vx += ux * f * t * 0.05; a.vy += uy * f * t * 0.05;
+        b.vx -= ux * f * t * 0.05; b.vy -= uy * f * t * 0.05;
+      }
+    }
+
+    // 引力（边）
+    for (const e of edges) {
+      const a = byName[e.a], b = byName[e.b];
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d * d) / k * 0.045;
+      const ux = dx / d, uy = dy / d;
+      a.vx += ux * f * t; a.vy += uy * f * t;
+      b.vx -= ux * f * t; b.vy -= uy * f * t;
+    }
+
+    // 向心力，防止飘散
+    for (const nd of nodes) {
+      nd.vx += (cx - nd.x) * 0.005 * t;
+      nd.vy += (cy - nd.y) * 0.005 * t;
+    }
+
+    // 应用位移并限制边界
+    const pad = 78;
+    for (const nd of nodes) {
+      nd.vx *= 0.82; nd.vy *= 0.82;
+      nd.x += Math.max(-28, Math.min(28, nd.vx));
+      nd.y += Math.max(-28, Math.min(28, nd.vy));
+      nd.x = Math.max(pad, Math.min(width - pad, nd.x));
+      nd.y = Math.max(pad, Math.min(height - pad, nd.y));
+    }
+  }
+
+  return nodes;
+}
+
+/* ---- 渲染 ---- */
+
+function renderRelations(analysis) {
+  const pane = $('#paneRelations');
+
+  if (!analysis || !analysis.units || !analysis.units.length) {
+    pane.innerHTML = `<div class="rel-empty"><b>还没有拆解结果</b>
+      人物关系图依赖拆书结果，请先点「开始拆书」。</div>`;
+    return;
+  }
+
+  const withDetail = analysis.units.filter(u => u.detail && u.detail.trim());
+  if (!withDetail.length) {
+    pane.innerHTML = `<div class="rel-empty"><b>拆解内容还在生成中</b>
+      等单元分析完成后再来看关系图。</div>`;
+    return;
+  }
+
+  // 记住上次选的单元
+  const selIdx = Number(pane.dataset.sel || 0);
+  const cur = withDetail[Math.min(selIdx, withDetail.length - 1)];
+
+  const chars = parseCharacters(cur.detail);
+  const names = chars.map(c => c.name);
+  const rels = parseRelations(cur.detail, names);
+
+  // 工具栏
+  const options = withDetail.map((u, i) =>
+    `<option value="${i}" ${u.seq === cur.seq ? 'selected' : ''}>第${u.seq}单元 · ${esc(u.name)}</option>`
+  ).join('');
+
+  pane.innerHTML = `
+    <div class="rel-toolbar">
+      <select class="rel-select" id="relUnitSel">${options}</select>
+      <span class="rel-hint"><b>${names.length}</b> 个角色 · <b>${rels.length}</b> 条关系</span>
+    </div>
+    <div class="rel-stage" id="relStage"></div>
+    <div class="rel-detail" id="relDetail" hidden></div>`;
+
+  $('#relUnitSel').onchange = (e) => {
+    pane.dataset.sel = e.target.value;
+    renderRelations(analysis);
+  };
+
+  if (!names.length) {
+    $('#relStage').innerHTML = `<div class="rel-empty"><b>本单元没有解析到角色</b>
+      可能是该单元的「登场角色」格式与预期不符。</div>`;
+    return;
+  }
+
+  drawGraph($('#relStage'), chars, rels, cur);
+
+  function drawGraph(stage, chars, rels, unit) {
+    const W = 900;
+    // 节点越多画布越高，但设上限避免过于稀疏
+    const H = Math.max(400, Math.min(560, 220 + chars.length * 55));
+
+    const nodes = chars.map((c, i) => ({
+      name: c.name, role: c.role, info: c.info, camp: c.camp,
+      action: c.action, effect: c.effect,
+      // 出现次数多/关系多的节点画得更大
+      weight: 1 + rels.filter(r => r.a === c.name || r.b === c.name).length,
+      color: REL_PALETTE[i % REL_PALETTE.length],
+    }));
+
+    layoutGraph(nodes, rels, W, H);
+
+    const byName = {};
+    nodes.forEach(nd => byName[nd.name] = nd);
+
+    // 边
+    let edgeSvg = '';
+    const seen = new Set();
+    for (const e of rels) {
+      const a = byName[e.a], b = byName[e.b];
+      if (!a || !b) continue;
+      const key = [e.a, e.b].sort().join('|');
+      const dup = seen.has(key);
+      seen.add(key);
+
+      const strong = e.desc && e.desc.length > 0;
+      edgeSvg += `<line class="rel-edge ${strong ? 'strong' : ''}" x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"/>`;
+
+      // 关系标签：沿边方向偏移放置，并避开节点中心，减少与角色名的重叠
+      if (strong && !dup) {
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        // 放在靠 b 侧 62% 处，避开两端节点
+        const mx = a.x + dx * 0.62;
+        const my = a.y + dy * 0.62;
+        // 垂直方向再推 12px，进一步错开
+        const nx = -dy / len * 12, ny = dx / len * 12;
+        const label = e.desc.length > 12 ? e.desc.slice(0, 12) + '…' : e.desc;
+        edgeSvg += `<text class="rel-edge-label" x="${(mx + nx).toFixed(1)}" y="${(my + ny).toFixed(1)}">${esc(label)}</text>`;
+      }
+    }
+
+    // 节点
+    let nodeSvg = '';
+    for (const nd of nodes) {
+      const r = 18 + Math.min(12, nd.weight * 2.2);
+      nodeSvg += `<g class="rel-node" data-name="${esc(nd.name)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">
+        <circle class="ring" r="${r + 4}"/>
+        <circle r="${r}" fill="${nd.color}"/>
+        <text y="${r + 15}">${esc(nd.name)}</text>
+      </g>`;
+    }
+
+    stage.innerHTML = `
+      <svg class="rel-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+        <g class="edges">${edgeSvg}</g>
+        <g class="nodes">${nodeSvg}</g>
+      </svg>
+      <div class="rel-legend">
+        ${nodes.slice(0, 8).map(nd =>
+          `<span><i style="background:${nd.color}"></i>${esc(nd.name)}</span>`).join('')}
+      </div>`;
+
+    // 点击节点：高亮并显示详情
+    $$('.rel-node', stage).forEach(g => {
+      g.onclick = () => {
+        const name = g.dataset.name;
+        const nd = nodes.find(x => x.name === name);
+        if (!nd) return;
+
+        const isSel = g.classList.contains('sel');
+        $$('.rel-node', stage).forEach(x => x.classList.remove('sel', 'dim'));
+        if (isSel) { $('#relDetail').hidden = true; return; }
+
+        g.classList.add('sel');
+        // 与它无关的节点淡化
+        const related = new Set([name]);
+        rels.forEach(r => { if (r.a === name) related.add(r.b); if (r.b === name) related.add(r.a); });
+        $$('.rel-node', stage).forEach(x => {
+          if (!related.has(x.dataset.name)) x.classList.add('dim');
+        });
+
+        showDetail(nd, rels.filter(r => r.a === name || r.b === name));
+      };
+    });
+
+    function showDetail(nd, myRels) {
+      const el = $('#relDetail');
+      el.hidden = false;
+      el.innerHTML = `
+        <h3>${esc(nd.name)}${nd.role ? `　<span style="font-size:12.5px;color:var(--text3);font-weight:500">${esc(nd.role)}</span>` : ''}</h3>
+        ${nd.info ? `<div class="kv"><b>背景</b>${esc(nd.info)}</div>` : ''}
+        ${nd.camp ? `<div class="kv"><b>阵营</b>${esc(nd.camp)}</div>` : ''}
+        ${nd.action ? `<div class="kv"><b>本单元</b>${esc(nd.action)}</div>` : ''}
+        ${nd.effect ? `<div class="kv"><b>作用</b>${esc(nd.effect)}</div>` : ''}
+        ${myRels.length ? `<ul class="rel-list">${myRels.map(r => {
+          const other = r.a === nd.name ? r.b : r.a;
+          return `<li><b style="color:var(--accent2)">${esc(other)}</b>：${esc(r.desc || '（无描述）')}</li>`;
+        }).join('')}</ul>` : '<div class="kv" style="margin-top:10px;color:var(--text3)">本单元未记录与他人的关系</div>'}`;
+    }
+  }
+}
+
 /* ============ 标签切换 ============ */
 function switchTab(name) {
   state.activeTab = name;
   $$('#bookTabs .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   $('#paneUnits').hidden = name !== 'units';
+  $('#paneRelations').hidden = name !== 'relations';
   $('#paneChapters').hidden = name !== 'chapters';
   $('#paneRaw').hidden = name !== 'raw';
   if (name === 'raw') renderRaw();
+  if (name === 'relations') {
+    store.getAnalysis(state.bookId).then(a => renderRelations(a));
+  }
 }
 
 /* ============ 初始化 ============ */
 /* 版本号：每次改动递增，用于确认线上是否为最新版 */
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const APP_BUILD = '2026-11-23';
 
 async function init() {
