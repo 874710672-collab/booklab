@@ -21,7 +21,16 @@ const DB_VER = 1;
 let _db = null;
 
 function openDB() {
-  if (_db) return Promise.resolve(_db);
+  // 复用连接前先确认它没被浏览器关掉（切前后台、内存压力下都会发生）
+  if (_db && _db.objectStoreNames.length) {
+    try {
+      // 试探性开启事务，能开说明连接还活着
+      _db.transaction('meta', 'readonly');
+      return Promise.resolve(_db);
+    } catch (e) {
+      _db = null;   // 连接已失效，重建
+    }
+  }
   return new Promise((res, rej) => {
     const req = indexedDB.open(DB_NAME, DB_VER);
     req.onupgradeneeded = (e) => {
@@ -41,8 +50,15 @@ function openDB() {
         db.createObjectStore('meta', { keyPath: 'k' });
       }
     };
-    req.onsuccess = () => { _db = req.result; res(_db); };
+    req.onsuccess = () => {
+      _db = req.result;
+      // 连接被外部关闭（如浏览器回收）时清空缓存，下次自动重连
+      _db.onclose = () => { _db = null; };
+      _db.onversionchange = () => { _db.close(); _db = null; };
+      res(_db);
+    };
     req.onerror = () => rej(req.error);
+    req.onblocked = () => rej(new Error('数据库被其他标签页占用'));
   });
 }
 
@@ -697,7 +713,7 @@ function renderAnalysis(a) {
 }
 
 /* ============ 执行拆书 ============ */
-async function runAnalysis(resume = false) {
+async function runAnalysis(resume = false, forceRestart = false) {
   if (state.busy) return;
   if (!state.cfg.apiKey) {
     toast('请先在「设置」里填 API Key', true);
@@ -710,13 +726,24 @@ async function runAnalysis(resume = false) {
   const chapters = state.chapters;
   if (!chapters || !chapters.length) { toast('这本书没有章节', true); return; }
 
-  let a = resume ? await store.getAnalysis(bookId) : null;
-  if (!a) {
+  // 关键：先读已有结果，绝不因为是「开始拆书」就把它丢掉
+  const existing = await store.getAnalysis(bookId);
+  const hasExisting = existing && existing.units && existing.units.length;
+  const hasDetail = hasExisting && existing.units.some(u => u.detail);
+
+  let a;
+  if (forceRestart) {
+    // 用户明确确认要重新拆
     a = { bookId, status: 'running', stage: '准备中', progress: 0,
           message: '', units: [], createdAt: Date.now() };
-  } else {
+  } else if (existing) {
+    // 沿用已有结果，只补齐未完成的单元（断点续拆）
+    a = existing;
     a.status = 'running';
-    a.message = '继续拆解…';
+    a.message = hasDetail ? '继续拆解未完成的单元…' : '继续拆解…';
+  } else {
+    a = { bookId, status: 'running', stage: '准备中', progress: 0,
+          message: '', units: [], createdAt: Date.now() };
   }
 
   state.busy = true;
@@ -793,6 +820,87 @@ async function runAnalysis(resume = false) {
     await loadBooks();
     if (state.bookId) await selectBook(state.bookId);
   }
+}
+
+/* ---- 开始拆书：按当前状态给出合适的二次确认 ---- */
+async function handleAnalyseClick() {
+  if (state.busy) { toast('正在拆解中，请稍候'); return; }
+  if (!state.cfg.apiKey) {
+    toast('请先在「设置」里填 API Key', true);
+    openModal('settings');
+    return;
+  }
+
+  const bookId = state.bookId;
+  const existing = await store.getAnalysis(bookId);
+  const units = (existing && existing.units) || [];
+  const doneUnits = units.filter(u => u.detail).length;
+  const totalUnits = units.length;
+
+  // 情况一：有完整结果 → 问是否重新拆（会覆盖）
+  if (totalUnits > 0 && doneUnits === totalUnits) {
+    const ok = await confirmDialog({
+      title: '这本书已经拆解完成',
+      body: `共 ${totalUnits} 个单元，全部已生成分析。\n\n重新拆解会覆盖现有结果，原内容将无法恢复。\n如果只是想查看，直接在下方展开单元即可。`,
+      confirmText: '重新拆解（覆盖）',
+      cancelText: '保留现有结果',
+      danger: true,
+    });
+    if (ok) runAnalysis(false, true);
+    return;
+  }
+
+  // 情况二：拆了一部分 → 问是否继续
+  if (totalUnits > 0) {
+    const ok = await confirmDialog({
+      title: '有未完成的拆解',
+      body: `已生成 ${doneUnits}/${totalUnits} 个单元。\n\n继续会只补齐未完成的 ${totalUnits - doneUnits} 个单元，已完成的不会重做。`,
+      confirmText: '继续拆解',
+      cancelText: '取消',
+      danger: false,
+    });
+    if (ok) runAnalysis(true);
+    return;
+  }
+
+  // 情况三：首次拆解
+  const ok = await confirmDialog({
+    title: '开始拆解这本书',
+    body: `共 ${state.chapters.length} 章、约 ${fmtNum(state.book ? state.book.charCnt : 0)} 字。\n\n拆解会调用 DeepSeek 接口，按单元数量产生相应费用。\n过程中可以随时关闭页面，下次会从断点继续。`,
+    confirmText: '开始拆解',
+    cancelText: '取消',
+    danger: false,
+  });
+  if (ok) runAnalysis(false);
+}
+
+/* ---- 通用确认弹窗 ---- */
+function confirmDialog({ title, body, confirmText = '确定', cancelText = '取消', danger = false }) {
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'confirm-mask';
+    mask.innerHTML = `
+      <div class="confirm-box">
+        <h3>${esc(title)}</h3>
+        <p>${esc(body).replace(/\n/g, '<br>')}</p>
+        <div class="confirm-actions">
+          <button class="btn ghost" data-act="cancel">${esc(cancelText)}</button>
+          <button class="btn ${danger ? 'danger-solid' : 'primary'}" data-act="ok">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(mask);
+
+    const close = (v) => {
+      mask.remove();
+      resolve(v);
+    };
+    mask.addEventListener('click', (e) => {
+      if (e.target === mask) return close(false);
+      const btn = e.target.closest('[data-act]');
+      if (!btn) return;
+      close(btn.dataset.act === 'ok');
+    });
+  });
 }
 
 /* ============ 导入 ============ */
@@ -1482,7 +1590,7 @@ function switchTab(name) {
 
 /* ============ 初始化 ============ */
 /* 版本号：每次改动递增，用于确认线上是否为最新版 */
-const APP_VERSION = '1.4.3';
+const APP_VERSION = '1.4.4';
 const APP_BUILD = '2026-11-23';
 
 async function init() {
@@ -1495,7 +1603,7 @@ async function init() {
   $('#btnImport2').onclick = () => openModal();
   $('#btnCloseModal').onclick = closeModal;
   $('#btnDoImport').onclick = doImport;
-  $('#btnAnalyse').onclick = () => runAnalysis(false);
+  $('#btnAnalyse').onclick = () => handleAnalyseClick();
   $('#btnDeleteBook').onclick = deleteBook;
   $('#modalMask').onclick = (e) => { if (e.target.id === 'modalMask') closeModal(); };
 

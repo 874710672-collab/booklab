@@ -258,6 +258,20 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 .toast.show{opacity:1;transform:translate(-50%,0)}
 .toast.err{border-color:rgba(224,92,92,.45);color:#ffb4b4}
 
+/* ---------- 确认弹窗 ---------- */
+.confirm-mask{position:fixed;inset:0;z-index:300;background:rgba(4,5,8,.8);
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  display:flex;align-items:center;justify-content:center;padding:24px;
+  animation:fadein .14s ease}
+.confirm-box{background:var(--bg2);border:1px solid var(--line);border-radius:15px;
+  width:100%;max-width:430px;padding:22px 24px 18px;box-shadow:var(--shadow);
+  animation:slideup .18s cubic-bezier(.2,.9,.3,1)}
+.confirm-box h3{margin:0 0 12px;font-size:16.5px;font-weight:620;color:var(--text)}
+.confirm-box p{margin:0 0 20px;font-size:13.5px;color:var(--text2);line-height:1.8}
+.confirm-actions{display:flex;gap:10px;justify-content:flex-end}
+.btn.danger-solid{background:#c94b4b;color:#fff;box-shadow:0 3px 12px rgba(201,75,75,.25)}
+.btn.danger-solid:hover{background:#dd5a5a}
+
 .pane-empty{text-align:center;padding:52px 24px;color:var(--text3);font-size:13.5px;
   border:1px dashed var(--line);border-radius:var(--r)}
 .pane-empty b{color:var(--text2);display:block;margin-bottom:6px;font-size:14.5px;font-weight:580}
@@ -390,6 +404,6 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="app.js?v=1795601526"></script>
+<script src="app.js?v=1795648283"></script>
 </body>
 </html>
