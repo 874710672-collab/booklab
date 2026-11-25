@@ -1,0 +1,85 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android-app/**'
+      - '.github/workflows/android.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: android-app
+        run: |
+          npm install --no-audit --no-fund
+
+      - name: Add Android platform
+        working-directory: android-app
+        run: |
+          npx cap add android
+
+      - name: Sync web assets
+        working-directory: android-app
+        run: |
+          npx cap sync android
+
+      - name: Patch Android manifest
+        working-directory: android-app/android
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          m = pathlib.Path('app/src/main/AndroidManifest.xml')
+          s = m.read_text()
+          if 'android:usesCleartextTraffic' not in s:
+              s = s.replace('<application',
+                            '<application\n        android:usesCleartextTraffic="true"', 1)
+              m.write_text(s)
+              print('Manifest patched')
+          else:
+              print('Manifest already patched')
+          PY
+
+      - name: Build debug APK
+        working-directory: android-app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build release APK (unsigned)
+        working-directory: android-app/android
+        run: |
+          ./gradlew assembleRelease --no-daemon --stacktrace || echo "release build skipped"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: booklab-apk
+          path: |
+            android-app/android/app/build/outputs/apk/debug/*.apk
+            android-app/android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Show artifacts
+        run: |
+          find android-app/android/app/build/outputs -name '*.apk' -exec ls -lh {} \;

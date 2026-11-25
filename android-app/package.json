@@ -1,0 +1,16 @@
+{
+  "name": "booklab",
+  "version": "1.4.3",
+  "description": "书析 · 网文拆书工作台",
+  "main": "index.js",
+  "scripts": {
+    "build": "echo no-build-step"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  }
+}
