@@ -138,8 +138,11 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 
 .rel-stage{position:relative;background:var(--bg2);border:1px solid var(--line);
   border-radius:var(--r);overflow:hidden}
-.rel-svg{display:block;width:100%;height:auto;touch-action:none;
-  -webkit-user-select:none;user-select:none}
+.rel-svg{display:block;width:100%;height:auto;
+  touch-action:pan-y pinch-zoom;   /* 允许页面纵向滚动与系统缩放 */
+  -webkit-user-select:none;user-select:none;cursor:grab}
+.rel-svg.dragging{cursor:grabbing}
+.rel-viewport{will-change:transform}
 
 .rel-edge{stroke:#39405080;stroke-width:1.6;fill:none}
 .rel-edge.strong{stroke:rgba(232,115,74,.55);stroke-width:2.4}
@@ -147,6 +150,7 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
   paint-order:stroke;stroke:#121419;stroke-width:3px;stroke-linejoin:round}
 
 .rel-node{cursor:pointer}
+.rel-node circle,.rel-node text{pointer-events:auto}
 .rel-node circle{stroke:#121419;stroke-width:2}
 .rel-node text{font-size:13px;fill:#e8eaf0;text-anchor:middle;
   paint-order:stroke;stroke:#121419;stroke-width:4px;
@@ -386,6 +390,6 @@ html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="app.js?v=142"></script>
+<script src="app.js?v=1795601526"></script>
 </body>
 </html>

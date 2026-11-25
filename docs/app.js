@@ -1149,6 +1149,147 @@ function layoutGraph(nodes, edges, width, height) {
   return nodes;
 }
 
+
+/* ---- 关系图交互：拖动 / 缩放 / 点击 ---- */
+/*
+ * 之前 SVG 设了 touch-action:none 但没有实现任何手势，
+ * 所以既不能拖动也影响了页面滚动。
+ * 这里实现统一的指针事件处理：
+ *   - 单指拖动：平移画布
+ *   - 双指捏合：缩放
+ *   - 点击节点（无位移）：选中角色
+ */
+
+function attachGraphInteraction(stage, svg, nodes, rels, onNodeClick) {
+  const viewport = svg.querySelector('.rel-viewport') || svg;
+  let tx = 0, ty = 0, scale = 1;
+  const MIN_SCALE = 0.5, MAX_SCALE = 3;
+
+  const applyTransform = () => {
+    viewport.setAttribute('transform',
+      `translate(${tx.toFixed(1)},${ty.toFixed(1)}) scale(${scale.toFixed(3)})`);
+  };
+
+  // ---- 指针状态 ----
+  const pointers = new Map();
+  let dragging = false;
+  let moved = false;
+  let startX = 0, startY = 0;
+  let startTx = 0, startTy = 0;
+  let pinchStartDist = 0, pinchStartScale = 1;
+
+  const localToSvg = (clientX, clientY) => {
+    const r = svg.getBoundingClientRect();
+    const vb = svg.viewBox.baseVal;
+    const sx = vb.width / r.width;
+    const sy = vb.height / r.height;
+    return { x: (clientX - r.left) * sx, y: (clientY - r.top) * sy };
+  };
+
+  stage.addEventListener('pointerdown', (e) => {
+    // 只处理落在 svg 上的
+    if (!svg.contains(e.target)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size === 1) {
+      dragging = true;
+      moved = false;
+      startX = e.clientX; startY = e.clientY;
+      startTx = tx; startTy = ty;
+      // 记下按到的节点（可能是 circle/text，需要向上找 .rel-node）
+      pressedNode = e.target.closest ? e.target.closest('.rel-node') : null;
+      stage.setPointerCapture?.(e.pointerId);
+    } else if (pointers.size === 2) {
+      // 进入双指缩放
+      dragging = false;
+      const pts = [...pointers.values()];
+      pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      pinchStartScale = scale;
+    }
+  });
+
+  stage.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size === 2) {
+      // 双指缩放
+      const pts = [...pointers.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      const next = pinchStartScale * (dist / pinchStartDist);
+      scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, next));
+      applyTransform();
+      e.preventDefault();
+      return;
+    }
+
+    if (!dragging) return;
+
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+    if (!moved) return;
+    svg.classList.add('dragging');
+
+    const r = svg.getBoundingClientRect();
+    const vb = svg.viewBox.baseVal;
+    // 屏幕像素换算到 viewBox 坐标
+    const kx = vb.width / r.width;
+    const ky = vb.height / r.height;
+
+    tx = startTx + dx * kx;
+    ty = startTy + dy * ky;
+    applyTransform();
+    e.preventDefault();
+  });
+
+  // 记录按下时命中的节点，抬起时用它判断点击
+  let pressedNode = null;
+
+  const endPointer = (e) => {
+    pointers.delete(e.pointerId);
+    svg.classList.remove('dragging');
+    if (pointers.size === 0) {
+      dragging = false;
+      // 没移动过，且按下时命中了节点 → 视为点击
+      if (!moved && pressedNode) {
+        onNodeClick(pressedNode);
+      }
+      pressedNode = null;
+      moved = false;
+    } else if (pointers.size === 1) {
+      // 双指变单指：重置拖动起点，避免跳变
+      const p = [...pointers.values()][0];
+      dragging = true;
+      startX = p.x; startY = p.y;
+      startTx = tx; startTy = ty;
+    }
+  };
+  stage.addEventListener('pointerup', endPointer);
+  stage.addEventListener('pointercancel', endPointer);
+  stage.addEventListener('pointerleave', (e) => {
+    if (pointers.has(e.pointerId)) endPointer(e);
+  });
+
+  // ---- 鼠标滚轮缩放（桌面） ----
+  stage.addEventListener('wheel', (e) => {
+    if (!svg.contains(e.target)) return;
+    e.preventDefault();
+    const next = scale * (e.deltaY > 0 ? 0.92 : 1.08);
+    scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, next));
+    applyTransform();
+  }, { passive: false });
+
+  // ---- 双击复位 ----
+  stage.addEventListener('dblclick', (e) => {
+    if (!svg.contains(e.target)) return;
+    tx = 0; ty = 0; scale = 1;
+    applyTransform();
+  });
+
+  return { applyTransform };
+}
+
 /* ---- 渲染 ---- */
 
 function renderRelations(analysis) {
@@ -1274,17 +1415,18 @@ function renderRelations(analysis) {
     stage.innerHTML = `
       <svg class="rel-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"
            style="width:100%;height:auto">
-        <g class="edges">${edgeSvg}</g>
-        <g class="nodes">${nodeSvg}</g>
+        <g class="rel-viewport">
+          <g class="edges">${edgeSvg}</g>
+          <g class="nodes">${nodeSvg}</g>
+        </g>
       </svg>
       <div class="rel-legend">
         ${nodes.slice(0, 8).map(nd =>
           `<span><i style="background:${nd.color}"></i>${esc(nd.name)}</span>`).join('')}
       </div>`;
 
-    // 点击节点：高亮并显示详情
-    $$('.rel-node', stage).forEach(g => {
-      g.onclick = () => {
+    // 点击节点：高亮并显示详情（由手势模块在「无位移」时回调）
+    const handleNodeClick = (g) => {
         const name = g.dataset.name;
         const nd = nodes.find(x => x.name === name);
         if (!nd) return;
@@ -1302,8 +1444,10 @@ function renderRelations(analysis) {
         });
 
         showDetail(nd, rels.filter(r => r.a === name || r.b === name));
-      };
-    });
+    };
+
+    // 接入手势：拖动平移、双指缩放、点击选中
+    attachGraphInteraction(stage, stage.querySelector('.rel-svg'), nodes, rels, handleNodeClick);
 
     function showDetail(nd, myRels) {
       const el = $('#relDetail');
@@ -1338,7 +1482,7 @@ function switchTab(name) {
 
 /* ============ 初始化 ============ */
 /* 版本号：每次改动递增，用于确认线上是否为最新版 */
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const APP_BUILD = '2026-11-23';
 
 async function init() {
