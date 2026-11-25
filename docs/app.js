@@ -1202,9 +1202,23 @@ function renderRelations(analysis) {
   drawGraph($('#relStage'), chars, rels, cur);
 
   function drawGraph(stage, chars, rels, unit) {
-    const W = 900;
-    // 节点越多画布越高，但设上限避免过于稀疏
-    const H = Math.max(400, Math.min(560, 220 + chars.length * 55));
+    // 画布宽度跟随可用区域。
+    // 注意：面板可能是隐藏状态（clientWidth 为 0），
+    // 所以用 window 宽度减去侧边栏和边距来估算，而不是依赖 clientWidth。
+    const stageEl = $('#relStage');
+    let availW = stageEl ? stageEl.clientWidth : 0;
+    if (!availW || availW < 200) {
+      const sidebar = $('#sidebar') ? $('#sidebar').offsetWidth : 272;
+      const isNarrow = window.innerWidth < 700;
+      availW = isNarrow ? window.innerWidth - 40
+                        : window.innerWidth - sidebar - 76;
+    }
+    // 直接按可用宽度做画布，避免 viewBox 缩放导致字号变小
+    const W = Math.max(300, Math.min(1000, Math.floor(availW)));
+
+    // 高度按节点数估算，并保证每个节点有足够间距
+    const perNode = Math.max(62, 340 / Math.max(1, Math.sqrt(chars.length)));
+    const H = Math.max(360, Math.min(680, 180 + chars.length * perNode * 0.55));
 
     const nodes = chars.map((c, i) => ({
       name: c.name, role: c.role, info: c.info, camp: c.camp,
@@ -1249,16 +1263,17 @@ function renderRelations(analysis) {
     // 节点
     let nodeSvg = '';
     for (const nd of nodes) {
-      const r = 18 + Math.min(12, nd.weight * 2.2);
+      const r = 20 + Math.min(14, nd.weight * 2.6);
       nodeSvg += `<g class="rel-node" data-name="${esc(nd.name)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">
         <circle class="ring" r="${r + 4}"/>
         <circle r="${r}" fill="${nd.color}"/>
-        <text y="${r + 15}">${esc(nd.name)}</text>
+        <text y="${r + 17}">${esc(nd.name)}</text>
       </g>`;
     }
 
     stage.innerHTML = `
-      <svg class="rel-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+      <svg class="rel-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"
+           style="width:100%;height:auto">
         <g class="edges">${edgeSvg}</g>
         <g class="nodes">${nodeSvg}</g>
       </svg>
@@ -1323,7 +1338,7 @@ function switchTab(name) {
 
 /* ============ 初始化 ============ */
 /* 版本号：每次改动递增，用于确认线上是否为最新版 */
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 const APP_BUILD = '2026-11-23';
 
 async function init() {
