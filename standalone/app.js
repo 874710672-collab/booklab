@@ -932,11 +932,12 @@ const REL_PALETTE = [
 /* ---- 从 markdown 里抽取角色与关系 ---- */
 
 function splitSections(md) {
-  // 按 ## 标题切片
+  // 只按二级标题（##）切分，三级标题（###）保留在 body 里，
+  // 因为角色名和关系对经常写在 ### 里
   const secs = [];
   let cur = null;
   for (const line of md.split('\n')) {
-    const m = line.match(/^#{2,3}\s+(.+?)\s*$/);
+    const m = line.match(/^##(?!#)\s+(.+?)\s*$/);
     if (m) {
       if (cur) secs.push(cur);
       cur = { title: m[1], body: [] };
@@ -997,34 +998,81 @@ function parseRelations(md, knownNames) {
   if (!sec) return [];
 
   const rels = [];
+  const seen = new Set();
+
+  // 统一清洗角色名：去加粗、去括号注释、去方括号、去列表符号
+  const cleanName = (x) => String(x || '')
+    .replace(/\*\*/g, '')
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/[\[\]【】《》""'']/g, '')
+    .replace(/^[\s\-—*+•\d.)、]+/, '')
+    .replace(/[\s\-—*+•]+$/, '')
+    .trim();
+
   const push = (a, b, desc) => {
-    a = a.trim(); b = b.trim();
+    a = cleanName(a);
+    b = cleanName(b);
     if (!a || !b || a === b) return;
-    // 只保留已知角色之间的边，避免噪声
+    if (a.length > 12 || b.length > 12) return;
+    // 只保留已知角色之间的边，避免把普通词当成角色
     if (knownNames.length && (!knownNames.includes(a) || !knownNames.includes(b))) return;
-    rels.push({ a, b, desc: (desc || '').trim() });
+    const key = [a, b].sort().join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    rels.push({ a, b, desc: String(desc || '').replace(/\*\*/g, '').trim() });
   };
 
-  for (const raw of sec.body) {
-    const line = raw.trim();
+  // 预处理：去掉加粗标记与方括号标签，统一箭头符号
+  const lines = sec.body.map(l =>
+    l.replace(/\*\*/g, '')
+     .replace(/【[^】]*】/g, '')       // 【主角】这类标签直接去掉
+     .replace(/\[[^\]]*\]/g, '')
+     .replace(/[➜➔⟶→]/g, '->')
+  );
+
+  const ARROW = /->/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
     if (!line) continue;
 
-    // A → B：关系  /  A -> B: 关系
-    let m = line.match(/^[-*+\d.)、\s]*\*{0,2}([^→\->：:\n]{1,12})\*{0,2}\s*(?:→|->|—>|=>)\s*\*{0,2}([^：:\n]{1,12})\*{0,2}\s*[：:]\s*(.*)$/);
+    // ---- 格式 A：A -> B：描述（也兼容 —— 破折号、~ 波浪线）----
+    let m = line.match(/^[-*+•\d.)、\s]*(.+?)\s*(?:->|—>|-->|=>|——|~|～|＜|<>|↔|<->)\s*(.+?)\s*[：:]\s*(.*)$/);
     if (m) { push(m[1], m[2], m[3]); continue; }
 
-    // A 与 B 是/为 xxx
-    m = line.match(/^[-*+\d.)、\s]*([^\s，,、：:]{1,10})\s*(?:与|和|跟)\s*([^\s，,、：:]{1,10})\s*[：:是]\s*(.*)$/);
-    if (m) { push(m[1], m[2], m[3]); continue; }
+    // ---- 格式 B：### A ↔ B ，下面几行是描述 ----
+    const h = line.match(/^#{3,4}\s*(.+?)\s*(?:↔|->|<->|——|—|与|和|＆|&)\s*(.+?)\s*$/);
+    if (h) {
+      const desc = [];
+      for (let j = i + 1; j < lines.length && desc.length < 3; j++) {
+        const t = lines[j].trim();
+        if (!t) { if (desc.length) break; else continue; }
+        if (/^#{2,4}\s/.test(t)) break;
+        desc.push(t);
+      }
+      push(h[1], h[2], desc.join(' '));
+      continue;
+    }
 
-    // A：xxx（单边描述，尝试从中找出另一个角色名）
-    m = line.match(/^[-*+\d.)、\s]*\*{0,2}([^\s，,、：:]{1,10})\*{0,2}\s*[：:]\s*(.*)$/);
+    // ---- 格式 C：A：描述（从描述里反查另一个角色）----
+    m = line.match(/^[-*+•\d.)、\s]*([^\s，,、：:]{1,12})\s*[：:]\s*(.*)$/);
     if (m) {
-      const a = m[1], desc = m[2];
-      const other = knownNames.find(n => n !== a && desc.includes(n));
-      if (other) push(a, other, desc);
+      const a = cleanName(m[1]);
+      const desc = m[2] || '';
+      const others = knownNames.filter(n => n !== a && desc.includes(n));
+      if (others.length) {
+        others.forEach(o => push(a, o, desc));
+      }
+      continue;
+    }
+
+    // ---- 格式 D：一行里同时出现两个角色名 ----
+    const mentioned = knownNames.filter(n => line.includes(n));
+    if (mentioned.length >= 2) {
+      push(mentioned[0], mentioned[1], line.replace(/^[-*+•\d.)、\s]+/, ''));
     }
   }
+
   return rels;
 }
 
@@ -1275,7 +1323,7 @@ function switchTab(name) {
 
 /* ============ 初始化 ============ */
 /* 版本号：每次改动递增，用于确认线上是否为最新版 */
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const APP_BUILD = '2026-11-23';
 
 async function init() {
