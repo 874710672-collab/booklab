@@ -1,0 +1,12 @@
+{
+  "appId": "com.booklab.app",
+  "appName": "书析",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
